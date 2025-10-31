@@ -1,0 +1,72 @@
+CXX = x86_64-elf-g++
+AS = x86_64-elf-as
+LD = x86_64-elf-ld
+OBJCOPY = x86_64-elf-objcopy
+
+CXXFLAGS = -std=c++26 -O3 -ffreestanding -fno-exceptions -fno-rtti \
+           -mno-red-zone -mcmodel=kernel -march=native -mtune=native \
+           -Wall -Wextra -Wpedantic -fno-stack-protector -fno-pic \
+           -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+           -fno-omit-frame-pointer -fmodules-ts \
+           -I./include/freestanding
+
+LDFLAGS = -T link.ld -nostdlib -z max-page-size=0x1000
+
+# Module sources (using fixed versions)
+MODULES = modules/core_fixed.cppm \
+          modules/concurrent_fixed.cppm \
+          modules/trading_fixed.cppm
+
+# Regular sources
+SRCS = boot/boot.S \
+       kernel/main_fixed.cpp
+
+# Module object files
+MODULE_OBJS = modules/core.o modules/concurrent.o modules/trading.o
+
+# Regular object files
+OBJS = boot/boot.o kernel/main.o
+
+TARGET = hft-zero.elf
+
+all: $(TARGET)
+
+# Build modules (order matters for dependencies)
+modules/core.o: modules/core_fixed.cppm
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+	
+modules/concurrent.o: modules/concurrent_fixed.cppm modules/core.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/trading.o: modules/trading_fixed.cppm modules/core.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Build kernel with modules
+kernel/main.o: kernel/main_fixed.cpp $(MODULE_OBJS)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+boot/boot.o: boot/boot.S
+	$(AS) -o $@ $<
+
+$(TARGET): $(OBJS) $(MODULE_OBJS)
+	$(LD) $(LDFLAGS) -o $@ $^
+	$(OBJCOPY) -O binary $@ hft-zero.bin
+
+run: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 4G
+
+debug: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 4G -s -S &
+	gdb $(TARGET) -ex "target remote :1234"
+
+clean:
+	rm -f $(OBJS) $(MODULE_OBJS) $(TARGET) hft-zero.bin
+	rm -f modules/*.o kernel/*.o boot/*.o
+	rm -rf gcm.cache
+
+.PHONY: all run debug clean
+
+# Dependencies
+kernel/main.o: $(MODULE_OBJS)
+modules/concurrent.o: modules/core.o
+modules/trading.o: modules/core.o

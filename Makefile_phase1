@@ -1,0 +1,154 @@
+# HFT-Zero Phase 1 Makefile
+# Complete 64-bit boot environment with memory management
+
+CXX = x86_64-elf-g++
+AS = x86_64-elf-as
+LD = x86_64-elf-ld
+OBJCOPY = x86_64-elf-objcopy
+
+CXXFLAGS = -std=c++26 -O2 -ffreestanding -fno-exceptions -fno-rtti \
+           -mno-red-zone -mcmodel=kernel -march=x86-64 \
+           -Wall -Wextra -Wpedantic -fno-stack-protector -fno-pic \
+           -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+           -fno-omit-frame-pointer -fmodules-ts \
+           -I./include/freestanding
+
+LDFLAGS = -T link.ld -nostdlib -z max-page-size=0x1000
+
+# Module sources
+MODULES = modules/core_fixed.cppm \
+          modules/gdt.cppm \
+          modules/idt.cppm \
+          modules/pmm.cppm \
+          modules/vmm.cppm \
+          modules/heap.cppm \
+          modules/concurrent_fixed.cppm \
+          modules/trading_fixed.cppm
+
+# Assembly sources  
+ASM_SRCS = boot/boot64.S \
+           kernel/isr.S
+
+# C++ sources
+CPP_SRCS = kernel/main_phase1.cpp
+
+# Object files
+MODULE_OBJS = $(MODULES:.cppm=.o)
+ASM_OBJS = $(ASM_SRCS:.S=.o)
+CPP_OBJS = $(CPP_SRCS:.cpp=.o)
+
+TARGET = hft-zero.elf
+
+all: $(TARGET)
+
+# Build modules (order matters!)
+modules/core_fixed.o: modules/core_fixed.cppm
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/gdt.o: modules/gdt.cppm modules/core_fixed.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/idt.o: modules/idt.cppm modules/core_fixed.o modules/gdt.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/pmm.o: modules/pmm.cppm modules/core_fixed.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/vmm.o: modules/vmm.cppm modules/core_fixed.o modules/pmm.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/heap.o: modules/heap.cppm modules/core_fixed.o modules/vmm.o modules/pmm.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/concurrent_fixed.o: modules/concurrent_fixed.cppm modules/core_fixed.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+modules/trading_fixed.o: modules/trading_fixed.cppm modules/core_fixed.o
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Build kernel
+kernel/main_phase1.o: kernel/main_phase1.cpp $(MODULE_OBJS)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Build assembly files
+%.o: %.S
+	$(AS) -o $@ $<
+
+$(TARGET): $(ASM_OBJS) $(MODULE_OBJS) $(CPP_OBJS)
+	$(LD) $(LDFLAGS) -o $@ $^
+	$(OBJCOPY) -O binary $@ hft-zero.bin
+
+run: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 256M -serial stdio
+
+debug: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 256M -serial stdio -s -S &
+	gdb $(TARGET) -ex "target remote :1234"
+
+clean:
+	rm -f $(MODULE_OBJS) $(ASM_OBJS) $(CPP_OBJS) $(TARGET) hft-zero.bin
+	rm -rf gcm.cache
+
+.PHONY: all run debug clean
+
+# Try with explicit multiboot option
+run-multiboot: hft-zero.elf
+	qemu-system-x86_64 \
+		-kernel hft-zero.elf \
+		-m 256M \
+		-serial stdio \
+		-display none \
+		-no-reboot \
+		-d guest_errors,int
+
+# Alternative: use grub-mkrescue if available
+run-grub: hft-zero.elf
+	@mkdir -p isodir/boot/grub
+	@cp hft-zero.elf isodir/boot/kernel.elf
+	@echo 'set timeout=0' > isodir/boot/grub/grub.cfg
+	@echo 'set default=0' >> isodir/boot/grub/grub.cfg
+	@echo 'menuentry "HFT-Zero" {' >> isodir/boot/grub/grub.cfg
+	@echo '    multiboot2 /boot/kernel.elf' >> isodir/boot/grub/grub.cfg
+	@echo '    boot' >> isodir/boot/grub/grub.cfg
+	@echo '}' >> isodir/boot/grub/grub.cfg
+	@grub-mkrescue -o hft-zero.iso isodir 2>/dev/null || echo "grub-mkrescue not found"
+	@qemu-system-x86_64 -cdrom hft-zero.iso -m 256M -serial stdio -display none
+
+	rm -rf isodir hft-zero.iso
+
+# Create bootable ISO with GRUB
+iso: hft-zero.elf
+	@echo "Creating bootable ISO..."
+	@mkdir -p isodir/boot/grub
+	@cp hft-zero.elf isodir/boot/kernel.elf
+	@echo 'set timeout=0' > isodir/boot/grub/grub.cfg
+	@echo 'set default=0' >> isodir/boot/grub/grub.cfg
+	@echo '' >> isodir/boot/grub/grub.cfg
+	@echo 'menuentry "HFT-Zero Kernel" {' >> isodir/boot/grub/grub.cfg
+	@echo '    multiboot2 /boot/kernel.elf' >> isodir/boot/grub/grub.cfg
+	@echo '    boot' >> isodir/boot/grub/grub.cfg
+	@echo '}' >> isodir/boot/grub/grub.cfg
+	grub-mkrescue -o hft-zero.iso isodir
+	@echo "ISO created: hft-zero.iso"
+
+run-iso: iso
+	@echo "Booting from ISO..."
+	qemu-system-x86_64 -cdrom hft-zero.iso -m 256M -serial stdio -display none -no-reboot
+
+clean-iso:
+	rm -rf isodir hft-zero.iso
+
+# Boot raw binary (simpler, no GRUB needed)
+run-raw: hft-zero.bin
+	@echo "Booting raw binary..."
+	@# Create a simple boot sector that jumps to our kernel
+	@printf '\x48\xc7\xc0\x00\x00\x10\x00\xff\xe0' | cat - hft-zero.bin > boot.img
+	@# Pad to at least 1MB
+	@truncate -s 2M boot.img
+	qemu-system-x86_64 -drive format=raw,file=boot.img -m 256M -serial stdio -display none
+
+# Even simpler: Use QEMU's built-in multiboot with explicit option
+run-simple: hft-zero.elf
+	@echo "Attempting to boot with QEMU multiboot..."
+	qemu-system-x86_64 -kernel hft-zero.elf -m 256M -nographic || \
+	echo "If this fails, you need grub-mkrescue. Install with: sudo apt-get install xorriso mtools"

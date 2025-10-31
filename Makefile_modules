@@ -1,0 +1,75 @@
+CXX = x86_64-elf-g++
+AS = x86_64-elf-as
+LD = x86_64-elf-ld
+OBJCOPY = x86_64-elf-objcopy
+
+CXXFLAGS = -std=c++26 -fmodules-ts -O3 -ffreestanding -fno-exceptions -fno-rtti \
+           -mno-red-zone -mcmodel=kernel -march=native -mtune=native \
+           -Wall -Wextra -Wpedantic -fno-stack-protector -fno-pic \
+           -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+           -fno-omit-frame-pointer
+
+LDFLAGS = -T link.ld -nostdlib -z max-page-size=0x1000
+
+# Module sources
+MODULES = modules/core.cppm \
+          modules/concurrent.cppm \
+          modules/trading.cppm
+
+# Regular sources
+SRCS = boot/boot.S \
+       kernel/main_modules.cpp
+
+# Module precompiled headers
+MODULE_PCMS = $(MODULES:.cppm=.pcm)
+MODULE_OBJS = $(MODULES:.cppm=.o)
+
+# Regular object files
+OBJS = $(SRCS:.cpp=.o)
+OBJS := $(OBJS:.S=.o)
+
+TARGET = hft-zero.elf
+
+all: $(TARGET)
+
+# Build modules first (order matters for dependencies)
+modules/core.pcm: modules/core.cppm
+	$(CXX) $(CXXFLAGS) -x c++-module -c $< -o modules/core.o
+	
+modules/concurrent.pcm: modules/concurrent.cppm modules/core.pcm
+	$(CXX) $(CXXFLAGS) -x c++-module -c $< -o modules/concurrent.o
+
+modules/trading.pcm: modules/trading.cppm modules/core.pcm
+	$(CXX) $(CXXFLAGS) -x c++-module -c $< -o modules/trading.o
+
+# Build kernel with modules
+kernel/main_modules.o: kernel/main_modules.cpp $(MODULE_PCMS)
+	$(CXX) $(CXXFLAGS) -fmodule-file=hft.core=modules/core.pcm \
+	                   -fmodule-file=hft.concurrent=modules/concurrent.pcm \
+	                   -fmodule-file=hft.trading=modules/trading.pcm \
+	                   -c -o $@ $<
+
+%.o: %.S
+	$(AS) -o $@ $<
+
+$(TARGET): $(OBJS) $(MODULE_OBJS)
+	$(LD) $(LDFLAGS) -o $@ $^
+	$(OBJCOPY) -O binary $@ hft-zero.bin
+
+run: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 4G -enable-kvm
+
+debug: $(TARGET)
+	qemu-system-x86_64 -kernel $(TARGET) -m 4G -s -S &
+	gdb $(TARGET) -ex "target remote :1234"
+
+clean:
+	rm -f $(OBJS) $(MODULE_OBJS) $(MODULE_PCMS) $(TARGET) hft-zero.bin
+	rm -f modules/*.pcm modules/*.o kernel/*.o boot/*.o
+
+.PHONY: all run debug clean
+
+# Dependencies
+kernel/main_modules.o: kernel/main_modules.cpp $(MODULE_PCMS)
+modules/concurrent.o: modules/core.pcm
+modules/trading.o: modules/core.pcm

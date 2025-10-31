@@ -223,4 +223,3 @@ For questions or issues, please open a GitHub issue.
 
 **Status**: Phase 1 Complete ✓
 **Next**: Phase 2 - Network Stack
-# hft-zero
