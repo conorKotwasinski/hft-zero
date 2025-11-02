@@ -1,4 +1,4 @@
-# kernel/isr.S - Interrupt Service Routine stubs
+# kernel/isr.S - Interrupt Service Routine stubs (FIXED)
 
 .section .text
 .code64
@@ -20,7 +20,7 @@ isr\num:
 .type isr\num, @function
 .align 16
 isr\num:
-    pushq $\num     # Push interrupt number
+    pushq $\num     # Push interrupt number (error code already pushed by CPU)
     jmp isr_common
 .endm
 
@@ -66,7 +66,7 @@ ISR_NOERRCODE 26  # Reserved
 ISR_NOERRCODE 27  # Reserved
 ISR_NOERRCODE 28  # Hypervisor injection
 ISR_NOERRCODE 29  # VMM communication
-ISR_NOERRCODE 30  # Security exception
+ISR_ERRCODE   30  # Security exception
 ISR_NOERRCODE 31  # Reserved
 
 # IRQ handlers (32-47)
@@ -91,7 +91,23 @@ IRQ 15, 47  # Secondary ATA
 .extern interrupt_handler_common
 .type isr_common, @function
 isr_common:
-    # Save all registers
+    # At this point stack has:
+    # [SS]           <- CPU pushed
+    # [RSP]          <- CPU pushed
+    # [RFLAGS]       <- CPU pushed
+    # [CS]           <- CPU pushed
+    # [RIP]          <- CPU pushed
+    # [error_code]   <- We pushed (or 0)
+    # [int_no]       <- We pushed
+    
+    # CRITICAL: Push registers in the order cpu_context expects!
+    # cpu_context layout:
+    #   r15, r14, r13, r12, r11, r10, r9, r8,
+    #   rdi, rsi, rbp, rbx, rdx, rcx, rax,
+    #   int_no, error_code,
+    #   rip, cs, rflags, rsp, ss
+    
+    # Save general purpose registers (in reverse order for structure)
     pushq %rax
     pushq %rcx
     pushq %rdx
@@ -108,38 +124,19 @@ isr_common:
     pushq %r14
     pushq %r15
     
-    # Save segment registers
-    movq %ds, %rax
-    pushq %rax
-    movq %es, %rax
-    pushq %rax
-    movq %fs, %rax
-    pushq %rax
-    movq %gs, %rax
-    pushq %rax
+    # Load kernel data segment (we're already in kernel code segment)
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %fs
+    movw %ax, %gs
     
-    # Load kernel data segment
-    movq $0x10, %rax
-    movq %rax, %ds
-    movq %rax, %es
-    movq %rax, %fs
-    movq %rax, %gs
-    
-    # Call C handler with pointer to saved context
-    movq %rsp, %rdi
+    # Call C handler with pointer to cpu_context structure
+    movq %rsp, %rdi     # First argument: pointer to saved context
+    cld                 # Clear direction flag (System V ABI requirement)
     call interrupt_handler_common
     
-    # Restore segment registers
-    popq %rax
-    movq %rax, %gs
-    popq %rax
-    movq %rax, %fs
-    popq %rax
-    movq %rax, %es
-    popq %rax
-    movq %rax, %ds
-    
-    # Restore all registers
+    # Restore all general purpose registers
     popq %r15
     popq %r14
     popq %r13

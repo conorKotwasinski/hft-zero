@@ -1,44 +1,66 @@
-OUTPUT_FORMAT(elf64-x86-64)
-OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x100000;
+    . = 1M;
     
-    .multiboot ALIGN(8) : {
-    *(.note.Xen)
+    .note.Xen ALIGN(4) :
+    {
+        *(.note.Xen)
+    }
+    
+    /* FIXED: Combine all boot sections into ONE output section */
+    .boot ALIGN(4K) :
+    {
         *(.multiboot2)
-    }
-    
-    .boot ALIGN(4K) : {
         *(.text.boot)
+        . = ALIGN(4K);
+        *(.boot.rodata)
+        . = ALIGN(16);
+        *(.boot.data)      /* ← GDT and GDT pointer here */
     }
     
-    .text ALIGN(4K) : {
+    .boot.bss ALIGN(4K) :
+    {
+        __boot_bss_start = .;
+        *(.boot.bss)
+        __boot_bss_end = .;
+    }
+    
+    .boot.stack ALIGN(4K) (NOLOAD) :
+    {
+        *(.boot.stack)
+    }
+    
+    __kernel_physical_start = .;
+    . += 0xFFFFFFFF80000000;
+    
+    .text ALIGN(4K) : AT(__kernel_physical_start)
+    {
+        __kernel_start = .;
         *(.text)
         *(.text.*)
     }
     
-    .rodata ALIGN(4K) : {
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - 0xFFFFFFFF80000000)
+    {
         *(.rodata)
         *(.rodata.*)
     }
     
-    .data ALIGN(4K) : {
+    .data ALIGN(4K) : AT(ADDR(.data) - 0xFFFFFFFF80000000)
+    {
         *(.data)
         *(.data.*)
     }
     
-    .ctors ALIGN(8) : {
-        __CTOR_LIST__ = .;
-        LONG((__CTOR_END__ - __CTOR_LIST__) / 8 - 2)
-        KEEP (*(.ctors))
-        LONG(0)
-        __CTOR_END__ = .;
+    .ctors ALIGN(8) : AT(ADDR(.ctors) - 0xFFFFFFFF80000000)
+    {
+        KEEP(*(.ctors))
     }
     
-    .bss ALIGN(4K) : {
+    .bss ALIGN(4K) : AT(ADDR(.bss) - 0xFFFFFFFF80000000)
+    {
         __bss_start = .;
         *(COMMON)
         *(.bss)
@@ -46,9 +68,12 @@ SECTIONS
         __bss_end = .;
     }
     
-    /DISCARD/ : {
+    __kernel_end = .;
+    
+    /DISCARD/ :
+    {
         *(.comment)
         *(.eh_frame)
-        *(.note*)
+        *(.note.gnu.build-id)
     }
 }

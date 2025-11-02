@@ -185,7 +185,7 @@ inline uint64_t kernel_start;
 inline uint64_t kernel_end;
 
 // Multiboot memory map parsing
-void parse_memory_map(void* mmap_addr, size_t mmap_length) noexcept {
+void parse_memory_map(void* mmap_addr, uint32_t mmap_length) noexcept {
     auto* entry = static_cast<memory_region*>(mmap_addr);
     auto* end = reinterpret_cast<memory_region*>(
         reinterpret_cast<uint8_t*>(mmap_addr) + mmap_length
@@ -216,17 +216,15 @@ void parse_memory_map(void* mmap_addr, size_t mmap_length) noexcept {
                     continue;
                 }
                 
-                // Determine zone
+                // Determine zone and mark free
                 if (addr < 16 * 1024 * 1024) {
                     zones[static_cast<int>(zone_type::dma)].mark_free(page);
                 } else if (addr < 4ULL * 1024 * 1024 * 1024) {
-                    zones[static_cast<int>(zone_type::normal)].mark_free(
-                        (page * PAGE_SIZE - 16 * 1024 * 1024) / PAGE_SIZE
-                    );
+                    size_t zone_page = (addr - 16 * 1024 * 1024) / PAGE_SIZE;
+                    zones[static_cast<int>(zone_type::normal)].mark_free(zone_page);
                 } else {
-                    zones[static_cast<int>(zone_type::high)].mark_free(
-                        (page * PAGE_SIZE - 4ULL * 1024 * 1024 * 1024) / PAGE_SIZE
-                    );
+                    size_t zone_page = (addr - 4ULL * 1024 * 1024 * 1024) / PAGE_SIZE;
+                    zones[static_cast<int>(zone_type::high)].mark_free(zone_page);
                 }
                 
                 stats.free_pages.fetch_add(1, memory_order::relaxed);
@@ -241,7 +239,7 @@ void parse_memory_map(void* mmap_addr, size_t mmap_length) noexcept {
 }
 
 // Initialize physical memory manager
-void init(void* mmap_addr, size_t mmap_length, 
+void init(void* mmap_addr, uint32_t mmap_length, 
           uint64_t kernel_phys_start, uint64_t kernel_phys_end) noexcept {
     kernel_start = kernel_phys_start;
     kernel_end = kernel_phys_end;
@@ -269,7 +267,63 @@ void init(void* mmap_addr, size_t mmap_length,
     );
     
     // Parse memory map and mark free pages
-    parse_memory_map(mmap_addr, mmap_length);
+    if (mmap_addr && mmap_length > 0) {
+        parse_memory_map(mmap_addr, mmap_length);
+    }
+}
+
+// Fallback init when no memory map is available
+void init_fallback(uint64_t kernel_phys_start, uint64_t kernel_phys_end,
+                   uint64_t total_mem) noexcept {
+    kernel_start = kernel_phys_start;
+    kernel_end = kernel_phys_end;
+    memory_size = total_mem;
+    
+    // Calculate bitmap locations (place after kernel)
+    uint64_t bitmap_start = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    
+    // Initialize zones
+    size_t dma_pages = (16 * 1024 * 1024) / PAGE_SIZE;
+    size_t normal_pages = (4ULL * 1024 * 1024 * 1024 - 16 * 1024 * 1024) / PAGE_SIZE;
+    size_t high_pages = (16ULL * 1024 * 1024 * 1024 - 4ULL * 1024 * 1024 * 1024) / PAGE_SIZE;
+    
+    zones[static_cast<int>(zone_type::dma)].init(
+        reinterpret_cast<uint64_t*>(bitmap_start), dma_pages
+    );
+    
+    bitmap_start += (dma_pages + 63) / 64 * 8;
+    zones[static_cast<int>(zone_type::normal)].init(
+        reinterpret_cast<uint64_t*>(bitmap_start), normal_pages
+    );
+    
+    bitmap_start += (normal_pages + 63) / 64 * 8;
+    zones[static_cast<int>(zone_type::high)].init(
+        reinterpret_cast<uint64_t*>(bitmap_start), high_pages
+    );
+    
+    // Calculate bitmap end
+    uint64_t bitmap_end = bitmap_start + (high_pages + 63) / 64 * 8;
+    
+    // Mark 16MB-total_mem as free (excluding kernel and bitmaps)
+    for (uint64_t addr = 16 * 1024 * 1024; addr < total_mem; addr += PAGE_SIZE) {
+        // Skip kernel
+        if (addr >= kernel_start && addr < kernel_end) {
+            continue;
+        }
+        
+        // Skip bitmap area (starts right after kernel, page-aligned)
+        uint64_t bitmap_phys_start = (kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        if (addr >= bitmap_phys_start && addr < bitmap_end) {
+            continue;
+        }
+        
+        // Mark page as free in normal zone
+        size_t zone_page = (addr - 16 * 1024 * 1024) / PAGE_SIZE;
+        zones[static_cast<int>(zone_type::normal)].mark_free(zone_page);
+        stats.free_pages.fetch_add(1, memory_order::relaxed);
+    }
+    
+    stats.total_pages.store(total_mem / PAGE_SIZE, memory_order::relaxed);
 }
 
 // Allocate a physical page
@@ -280,16 +334,22 @@ uint64_t allocate_page(zone_type zone = zone_type::normal) noexcept {
         // Try other zones
         if (zone != zone_type::high) {
             page_num = zones[static_cast<int>(zone_type::high)].allocate();
+            if (page_num != static_cast<size_t>(-1)) {
+                zone = zone_type::high;
+            }
         }
         if (page_num == static_cast<size_t>(-1) && zone != zone_type::dma) {
             page_num = zones[static_cast<int>(zone_type::dma)].allocate();
+            if (page_num != static_cast<size_t>(-1)) {
+                zone = zone_type::dma;
+            }
         }
     }
     
     if (page_num != static_cast<size_t>(-1)) {
         stats.free_pages.fetch_add(-1, memory_order::relaxed);
         
-        // Convert page number to physical address
+        // Convert page number to physical address based on zone
         if (zone == zone_type::dma) {
             return page_num * PAGE_SIZE;
         } else if (zone == zone_type::normal) {
@@ -354,10 +414,10 @@ void free_pages(uint64_t addr, size_t count) noexcept {
 // Get memory statistics
 memory_stats_snapshot get_stats() noexcept {
     return {
-        stats.total_pages.load(),
-        stats.free_pages.load(),
-        stats.reserved_pages.load(),
-        stats.kernel_pages.load()
+        stats.total_pages.load(memory_order::relaxed),
+        stats.free_pages.load(memory_order::relaxed),
+        stats.reserved_pages.load(memory_order::relaxed),
+        stats.kernel_pages.load(memory_order::relaxed)
     };
 }
 

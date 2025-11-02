@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.elf
+*.bin
+*.iso
+gcm.cache/
+
+# Log files
+*.log
+debug_boot.sh
+
+# Temporary files
+output.txt
+build.log
+test_config.txt
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+modules/.DS_Store
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# ISO directory (generated)
+isodir/
+
+# Backup directories
+backup/
